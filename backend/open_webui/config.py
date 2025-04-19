@@ -254,7 +254,6 @@ class PersistentConfig(Generic[T]):
         save_to_db(CONFIG_DATA)
         self.config_value = self.value
 
-
 class AppConfig:
     _state: dict[str, PersistentConfig]
     _redis: Optional[redis.Redis] = None
@@ -307,6 +306,19 @@ class AppConfig:
 ####################################
 # WEBUI_AUTH (Required for security)
 ####################################
+
+# Add these new configurations
+CF_ACCESS_CLIENT_ID = PersistentConfig(
+    "CF_ACCESS_CLIENT_ID",
+    "ollama.cf_access_client_id",
+    os.getenv("CF_ACCESS_CLIENT_ID", ""),
+)
+
+CF_ACCESS_CLIENT_SECRET = PersistentConfig(
+    "CF_ACCESS_CLIENT_SECRET", 
+    "ollama.cf_access_client_secret",
+    os.getenv("CF_ACCESS_CLIENT_SECRET", ""),
+)
 
 ENABLE_API_KEY = PersistentConfig(
     "ENABLE_API_KEY",

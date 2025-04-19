@@ -70,34 +70,38 @@ log.setLevel(SRC_LOG_LEVELS["OLLAMA"])
 #
 ##########################################
 
-
-async def send_get_request(url, key=None, user: UserModel = None):
+async def send_get_request(request: Request, url, key=None, user: UserModel = None):
     timeout = aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST)
     try:
         async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
-            async with session.get(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    **({"Authorization": f"Bearer {key}"} if key else {}),
-                    **(
-                        {
-                            "X-OpenWebUI-User-Name": user.name,
-                            "X-OpenWebUI-User-Id": user.id,
-                            "X-OpenWebUI-User-Email": user.email,
-                            "X-OpenWebUI-User-Role": user.role,
-                        }
-                        if ENABLE_FORWARD_USER_INFO_HEADERS and user
-                        else {}
-                    ),
-                },
-            ) as response:
+            headers = {
+                "Content-Type": "application/json",
+                **({"Authorization": f"Bearer {key}"} if key else {}),
+                **(
+                    {
+                        "X-OpenWebUI-User-Name": user.name,
+                        "X-OpenWebUI-User-Id": user.id,
+                        "X-OpenWebUI-User-Email": user.email,
+                        "X-OpenWebUI-User-Role": user.role,
+                    }
+                    if ENABLE_FORWARD_USER_INFO_HEADERS and user
+                    else {}
+                ),
+            }
+
+            # Add Cloudflare Access headers
+            if request.app.state.config.CF_ACCESS_CLIENT_ID and request.app.state.config.CF_ACCESS_CLIENT_SECRET:
+                headers.update({
+                    "CF-Access-Client-Id": request.app.state.config.CF_ACCESS_CLIENT_ID,
+                    "CF-Access-Client-Secret": request.app.state.config.CF_ACCESS_CLIENT_SECRET
+                })
+
+            async with session.get(url, headers=headers) as response:
                 return await response.json()
     except Exception as e:
-        # Handle connection error here
         log.error(f"Connection error: {e}")
         return None
-
+    
 
 async def cleanup_response(
     response: Optional[aiohttp.ClientResponse],
@@ -110,6 +114,7 @@ async def cleanup_response(
 
 
 async def send_post_request(
+    request: Request,  
     url: str,
     payload: Union[str, bytes],
     stream: bool = True,
@@ -124,24 +129,34 @@ async def send_post_request(
             trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
         )
 
+        headers = {
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {key}"} if key else {}),
+            **(
+                {
+                    "X-OpenWebUI-User-Name": user.name,
+                    "X-OpenWebUI-User-Id": user.id,
+                    "X-OpenWebUI-User-Email": user.email,
+                    "X-OpenWebUI-User-Role": user.role,
+                }
+                if ENABLE_FORWARD_USER_INFO_HEADERS and user
+                else {}
+            ),
+        }
+
+        # Add Cloudflare Access headers if configured
+        if request.app.state.config.CF_ACCESS_CLIENT_ID and request.app.state.config.CF_ACCESS_CLIENT_SECRET:
+            headers.update({
+                "CF-Access-Client-Id": request.app.state.config.CF_ACCESS_CLIENT_ID,
+                "CF-Access-Client-Secret": request.app.state.config.CF_ACCESS_CLIENT_SECRET
+            })
+
         r = await session.post(
             url,
             data=payload,
-            headers={
-                "Content-Type": "application/json",
-                **({"Authorization": f"Bearer {key}"} if key else {}),
-                **(
-                    {
-                        "X-OpenWebUI-User-Name": user.name,
-                        "X-OpenWebUI-User-Id": user.id,
-                        "X-OpenWebUI-User-Email": user.email,
-                        "X-OpenWebUI-User-Role": user.role,
-                    }
-                    if ENABLE_FORWARD_USER_INFO_HEADERS and user
-                    else {}
-                ),
-            },
+            headers=headers,
         )
+
         r.raise_for_status()
 
         if stream:
@@ -304,7 +319,7 @@ async def get_all_models(request: Request, user: UserModel = None):
             if (str(idx) not in request.app.state.config.OLLAMA_API_CONFIGS) and (
                 url not in request.app.state.config.OLLAMA_API_CONFIGS  # Legacy support
             ):
-                request_tasks.append(send_get_request(f"{url}/api/tags", user=user))
+                request_tasks.append(send_get_request(request=request, url=f"{url}/api/tags", user=user))
             else:
                 api_config = request.app.state.config.OLLAMA_API_CONFIGS.get(
                     str(idx),
@@ -318,7 +333,7 @@ async def get_all_models(request: Request, user: UserModel = None):
 
                 if enable:
                     request_tasks.append(
-                        send_get_request(f"{url}/api/tags", key, user=user)
+                        send_get_request(request=request, url=f"{url}/api/tags", key=key, user=user)
                     )
                 else:
                     request_tasks.append(asyncio.ensure_future(asyncio.sleep(0, None)))
@@ -481,8 +496,9 @@ async def get_ollama_versions(request: Request, url_idx: Optional[int] = None):
                 if enable:
                     request_tasks.append(
                         send_get_request(
-                            f"{url}/api/version",
-                            key,
+                            request=request,
+                            url=f"{url}/api/version",
+                            key=key,
                         )
                     )
 
@@ -577,6 +593,7 @@ async def pull_model(
     payload = {**form_data.model_dump(exclude_none=True), "insecure": True}
 
     return await send_post_request(
+        request=request,
         url=f"{url}/api/pull",
         payload=json.dumps(payload),
         key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
@@ -614,6 +631,7 @@ async def push_model(
     log.debug(f"url: {url}")
 
     return await send_post_request(
+        request=request,
         url=f"{url}/api/push",
         payload=form_data.model_dump_json(exclude_none=True).encode(),
         key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
@@ -641,6 +659,7 @@ async def create_model(
     url = request.app.state.config.OLLAMA_BASE_URLS[url_idx]
 
     return await send_post_request(
+        request=request,
         url=f"{url}/api/create",
         payload=form_data.model_dump_json(exclude_none=True).encode(),
         key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
@@ -1052,6 +1071,7 @@ async def generate_completion(
         form_data.model = form_data.model.replace(f"{prefix_id}.", "")
 
     return await send_post_request(
+        request=request,
         url=f"{url}/api/generate",
         payload=form_data.model_dump_json(exclude_none=True).encode(),
         key=get_api_key(url_idx, url, request.app.state.config.OLLAMA_API_CONFIGS),
@@ -1180,6 +1200,7 @@ async def generate_chat_completion(
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
     # payload["keep_alive"] = -1 # keep alive forever
     return await send_post_request(
+        request=request,
         url=f"{url}/api/chat",
         payload=json.dumps(payload),
         stream=form_data.stream,
@@ -1284,6 +1305,7 @@ async def generate_openai_completion(
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
     return await send_post_request(
+        request=request,
         url=f"{url}/v1/completions",
         payload=json.dumps(payload),
         stream=payload.get("stream", False),
@@ -1363,6 +1385,7 @@ async def generate_openai_chat_completion(
         payload["model"] = payload["model"].replace(f"{prefix_id}.", "")
 
     return await send_post_request(
+        request=request,
         url=f"{url}/v1/chat/completions",
         payload=json.dumps(payload),
         stream=payload.get("stream", False),
